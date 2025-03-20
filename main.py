@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
 from typing import List, Optional
-from pydantic import BaseModel, validator, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 import mysql.connector
 from mysql.connector import pooling
 import uvicorn
@@ -91,28 +91,32 @@ class EmpleadoBase(BaseModel):
     salario: float = Field(..., gt=0)
     usuario: Optional[int] = None
 
-    # Validadores para formatos específicos
-    @validator('curp')
+    # Validadores actualizados a Pydantic V2
+    @field_validator('curp')
+    @classmethod
     def validate_curp(cls, v):
         pattern = r'^[A-Z]{4}[0-9]{6}[HM][A-Z]{5}[0-9A-Z]{2}$'
         if not re.match(pattern, v):
             raise ValueError('CURP inválido')
         return v
 
-    @validator('rfc')
+    @field_validator('rfc')
+    @classmethod
     def validate_rfc(cls, v):
         pattern = r'^[A-Z]{3,4}[0-9]{6}[A-Z0-9]{3}$'
         if not re.match(pattern, v):
             raise ValueError('RFC inválido')
         return v
 
-    @validator('nss')
+    @field_validator('nss')
+    @classmethod
     def validate_nss(cls, v):
         if not v.isdigit() or len(v) != 11:
             raise ValueError('NSS debe contener 11 dígitos numéricos')
         return v
 
-    @validator('fecha_nacimiento', 'fecha_ingreso')
+    @field_validator('fecha_nacimiento', 'fecha_ingreso')
+    @classmethod
     def validate_fecha(cls, v):
         try:
             datetime.strptime(v, '%Y-%m-%d')
@@ -120,7 +124,8 @@ class EmpleadoBase(BaseModel):
             raise ValueError('Formato de fecha inválido. Use YYYY-MM-DD')
         return v
 
-    @validator('telefono')
+    @field_validator('telefono')
+    @classmethod
     def validate_telefono(cls, v):
         if v and not re.match(r'^\+?[0-9]{10,15}$', v):
             raise ValueError('Formato de teléfono inválido')
@@ -142,12 +147,12 @@ class EmpleadoResponse(EmpleadoBase):
     id_empleado: int
 
     class Config:
-        orm_mode = True
+        from_attributes = True  # Reemplaza orm_mode=True
 
 
 class BusquedaEmpleado(BaseModel):
     termino: str = Field(..., min_length=1, max_length=100)
-    campo: Optional[str] = Field(None, regex=r'^[a-zA-Z_]+$')  # Solo permite letras y guiones bajos
+    campo: Optional[str] = Field(None, pattern=r'^[a-zA-Z_]+$')  # Cambiado regex por pattern
 
 
 # Configuración de autenticación
@@ -315,7 +320,7 @@ async def create_empleado(empleado: EmpleadoCreate, current_user: dict = Depends
             )
 
         # Preparar los campos para la inserción
-        campos = empleado.dict(exclude_unset=True)  # Solo incluir campos definidos
+        campos = empleado.model_dump(exclude_unset=True)  # Cambiado dict() por model_dump()
         campos_nombres = list(campos.keys())
         placeholders = ", ".join(["%s"] * len(campos_nombres))
         campos_str = ", ".join(campos_nombres)
@@ -375,7 +380,7 @@ async def update_empleado(empleado_id: int, empleado_update: EmpleadoCreate,
             )
 
         # Preparar los campos para la actualización
-        campos = empleado_update.dict(exclude_unset=True)
+        campos = empleado_update.model_dump(exclude_unset=True)  # Cambiado dict() por model_dump()
         set_clause = ", ".join([f"{k} = %s" for k in campos.keys()])
         values = list(campos.values())
         values.append(empleado_id)  # Para la condición WHERE
