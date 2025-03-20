@@ -422,6 +422,76 @@ async def get_catalogo(catalogo: str, current_user: dict = Depends(get_current_u
         conn.close()
 
 
-# Punto de entrada para ejecución local
+def print_endpoints(host_ip):
+    """Imprime todos los endpoints disponibles en la API con sus descripciones."""
+    print("\n" + "=" * 80)
+    print(f"API de Empleados - Endpoints disponibles en http://{host_ip}:8000")
+    print("=" * 80)
+
+    # Autenticación
+    print("\n-- AUTENTICACIÓN --")
+    print(f"POST http://{host_ip}:8000/token")
+    print("  Descripción: Obtener token de autenticación")
+    print("  Cuerpo: {'username': 'correo@ejemplo.com', 'password': 'contraseña'}")
+
+    # Empleados
+    print("\n-- GESTIÓN DE EMPLEADOS --")
+    print(f"GET http://{host_ip}:8000/empleados/")
+    print("  Descripción: Obtiene la lista de todos los empleados")
+    print("  Parámetros query opcionales: skip, limit")
+
+    print(f"GET http://{host_ip}:8000/empleados/{{empleado_id}}")
+    print("  Descripción: Obtiene los detalles de un empleado específico por su ID")
+
+    print(f"POST http://{host_ip}:8000/empleados/")
+    print("  Descripción: Crea un nuevo empleado")
+    print("  Cuerpo: Objeto JSON con los datos del empleado")
+
+    print(f"PUT http://{host_ip}:8000/empleados/{{empleado_id}}")
+    print("  Descripción: Actualiza la información de un empleado existente")
+    print("  Cuerpo: Objeto JSON con los datos actualizados")
+
+    print(f"DELETE http://{host_ip}:8000/empleados/{{empleado_id}}")
+    print("  Descripción: Elimina un empleado por su ID")
+
+    print(f"POST http://{host_ip}:8000/empleados/buscar/")
+    print("  Descripción: Busca empleados por diferentes criterios")
+    print("  Cuerpo: {'termino': 'texto a buscar', 'campo': 'campo_opcional'}")
+
+    # Catálogos
+    print("\n-- CATÁLOGOS --")
+    print(f"GET http://{host_ip}:8000/catalogos/{{catalogo}}")
+    print("  Descripción: Obtiene los datos de un catálogo específico")
+    print("  Catálogos disponibles: sexo, estado_civil, tipo_contrato, departamento, puesto, turno, sucursal, roles")
+
+    # Documentación
+    print("\n-- DOCUMENTACIÓN --")
+    print(f"GET http://{host_ip}:8000/docs")
+    print("  Descripción: Interfaz Swagger para probar y explorar la API")
+
+    print(f"GET http://{host_ip}:8000/redoc")
+    print("  Descripción: Documentación alternativa de la API en formato ReDoc")
+
+    print("\n-- NOTA --")
+    print("  Todos los endpoints (excepto documentación) requieren autenticación con token Bearer:")
+    print("  Header: Authorization: Bearer tu_token_aquí")
+    print("=" * 80 + "\n")
+
+
+# Modificar la sección de punto de entrada para incluir la impresión de endpoints
 if __name__ == "__main__":
+    # Obtener la IP pública (esto es solo un ejemplo, deberías obtenerla de forma dinámica)
+    import requests
+
+    try:
+        # Intentar obtener la IP pública
+        ip_publica = requests.get('https://api.ipify.org').text
+    except:
+        # Si falla, usar un placeholder
+        ip_publica = "tu-ip-publica-ec2"
+
+    # Imprimir los endpoints
+    print_endpoints(ip_publica)
+
+    # Iniciar el servidor
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
