@@ -11,6 +11,7 @@ import uvicorn
 import os
 import re
 from dotenv import load_dotenv
+from contextlib import contextmanager
 
 # Cargar variables de entorno
 load_dotenv()
@@ -46,11 +47,33 @@ db_config = {
 }
 
 # Crear un pool de conexiones para mejorar rendimiento y seguridad
+# Nota: El pool solo se inicializa, pero no se crean conexiones hasta que se soliciten
 connection_pool = pooling.MySQLConnectionPool(
     pool_name="empleados_pool",
     pool_size=5,
+    pool_reset_session=True,  # Asegura que las sesiones se resetean al devolver conexiones
     **db_config
 )
+
+
+# Context manager para manejar conexiones automáticamente
+@contextmanager
+def get_db_connection():
+    conn = None
+    try:
+        # La conexión solo se obtiene cuando se entra en este contexto (cuando se llama a la ruta)
+        conn = connection_pool.get_connection()
+        yield conn
+    except mysql.connector.Error as e:
+        print(f"Error de conexión a la base de datos: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error de conexión a la base de datos"
+        )
+    finally:
+        # La conexión se cierra automáticamente al salir del contexto
+        if conn:
+            conn.close()
 
 
 # Modelos de datos mejorados con validaciones
@@ -159,19 +182,6 @@ class BusquedaEmpleado(BaseModel):
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 
-# Función para obtener conexión del pool
-def get_db_connection():
-    try:
-        conn = connection_pool.get_connection()
-        return conn
-    except mysql.connector.Error as e:
-        print(f"Error de conexión a la base de datos: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error de conexión a la base de datos"
-        )
-
-
 # Middleware para sanitizar consultas SQL
 def sanitize_sql_input(value):
     if isinstance(value, str):
@@ -206,50 +216,50 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         raise credentials_exception
 
     # Verificar en la base de datos si el usuario existe
-    conn = get_db_connection()
-    try:
+    # Usando context manager para manejar la conexión automáticamente
+    with get_db_connection() as conn:
         cursor = conn.cursor(dictionary=True, prepared=True)  # Usar prepared statements
-        query = "SELECT id_usuario, correo, rol FROM Usuarios WHERE correo = %s"
-        cursor.execute(query, (token_data.username,))
-        user = cursor.fetchone()
-        if user is None:
-            raise credentials_exception
-        return user
-    finally:
-        cursor.close()
-        conn.close()
+        try:
+            query = "SELECT id_usuario, correo, rol FROM Usuarios WHERE correo = %s"
+            cursor.execute(query, (token_data.username,))
+            user = cursor.fetchone()
+            if user is None:
+                raise credentials_exception
+            return user
+        finally:
+            cursor.close()
 
 
 # Endpoints de autenticación
 @app.post("/token", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
-    conn = get_db_connection()
-    try:
+    # Usando context manager para manejar la conexión automáticamente
+    with get_db_connection() as conn:
         cursor = conn.cursor(dictionary=True, prepared=True)
-        # En un entorno real, la contraseña debería estar hasheada
-        query = "SELECT id_usuario, correo, contraseña, rol FROM Usuarios WHERE correo = %s"
-        cursor.execute(query, (form_data.username,))
-        user = cursor.fetchone()
+        try:
+            # En un entorno real, la contraseña debería estar hasheada
+            query = "SELECT id_usuario, correo, contraseña, rol FROM Usuarios WHERE correo = %s"
+            cursor.execute(query, (form_data.username,))
+            user = cursor.fetchone()
 
-        if not user or user["contraseña"] != form_data.password:
-            # Retardo adicional para prevenir ataques de timing
-            import time
-            time.sleep(0.5)
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Usuario o contraseña incorrectos",
-                headers={"WWW-Authenticate": "Bearer"},
+            if not user or user["contraseña"] != form_data.password:
+                # Retardo adicional para prevenir ataques de timing
+                import time
+                time.sleep(0.5)
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Usuario o contraseña incorrectos",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+
+            access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+            access_token = create_access_token(
+                data={"sub": user["correo"], "role": user["rol"]},
+                expires_delta=access_token_expires
             )
-
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(
-            data={"sub": user["correo"], "role": user["rol"]},
-            expires_delta=access_token_expires
-        )
-        return {"access_token": access_token, "token_type": "bearer"}
-    finally:
-        cursor.close()
-        conn.close()
+            return {"access_token": access_token, "token_type": "bearer"}
+        finally:
+            cursor.close()
 
 
 # Endpoints de empleados
@@ -262,20 +272,20 @@ async def get_empleados(current_user: dict = Depends(get_current_user), skip: in
             detail="Parámetros de paginación inválidos"
         )
 
-    conn = get_db_connection()
-    try:
+    # Usando context manager para manejar la conexión automáticamente
+    with get_db_connection() as conn:
         cursor = conn.cursor(dictionary=True, prepared=True)
-        query = """
-            SELECT * FROM Empleados
-            ORDER BY id_empleado
-            LIMIT %s OFFSET %s
-            """
-        cursor.execute(query, (limit, skip))
-        empleados = cursor.fetchall()
-        return empleados
-    finally:
-        cursor.close()
-        conn.close()
+        try:
+            query = """
+                SELECT * FROM Empleados
+                ORDER BY id_empleado
+                LIMIT %s OFFSET %s
+                """
+            cursor.execute(query, (limit, skip))
+            empleados = cursor.fetchall()
+            return empleados
+        finally:
+            cursor.close()
 
 
 @app.get("/empleados/{empleado_id}", response_model=EmpleadoResponse)
@@ -286,66 +296,65 @@ async def get_empleado(empleado_id: int, current_user: dict = Depends(get_curren
             detail="ID de empleado inválido"
         )
 
-    conn = get_db_connection()
-    try:
+    # Usando context manager para manejar la conexión automáticamente
+    with get_db_connection() as conn:
         cursor = conn.cursor(dictionary=True, prepared=True)
-        query = "SELECT * FROM Empleados WHERE id_empleado = %s"
-        cursor.execute(query, (empleado_id,))
-        empleado = cursor.fetchone()
-        if empleado is None:
-            raise HTTPException(status_code=404, detail="Empleado no encontrado")
-        return empleado
-    finally:
-        cursor.close()
-        conn.close()
+        try:
+            query = "SELECT * FROM Empleados WHERE id_empleado = %s"
+            cursor.execute(query, (empleado_id,))
+            empleado = cursor.fetchone()
+            if empleado is None:
+                raise HTTPException(status_code=404, detail="Empleado no encontrado")
+            return empleado
+        finally:
+            cursor.close()
 
 
 @app.post("/empleados/", response_model=EmpleadoResponse, status_code=status.HTTP_201_CREATED)
 async def create_empleado(empleado: EmpleadoCreate, current_user: dict = Depends(get_current_user)):
-    conn = get_db_connection()
-    try:
+    # Usando context manager para manejar la conexión automáticamente
+    with get_db_connection() as conn:
         cursor = conn.cursor(dictionary=True, prepared=True)
+        try:
+            # Verificar si ya existe un empleado con CURP, correo, RFC o NSS existente
+            query = """
+                SELECT id_empleado FROM Empleados 
+                WHERE curp = %s OR correo = %s OR rfc = %s OR nss = %s
+                """
+            cursor.execute(query, (empleado.curp, empleado.correo, empleado.rfc, empleado.nss))
 
-        # Verificar si ya existe un empleado con CURP, correo, RFC o NSS existente
-        query = """
-            SELECT id_empleado FROM Empleados 
-            WHERE curp = %s OR correo = %s OR rfc = %s OR nss = %s
-            """
-        cursor.execute(query, (empleado.curp, empleado.correo, empleado.rfc, empleado.nss))
+            if cursor.fetchone():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Ya existe un empleado con CURP, correo, RFC o NSS proporcionado"
+                )
 
-        if cursor.fetchone():
+            # Preparar los campos para la inserción
+            campos = empleado.model_dump(exclude_unset=True)  # Cambiado dict() por model_dump()
+            campos_nombres = list(campos.keys())
+            placeholders = ", ".join(["%s"] * len(campos_nombres))
+            campos_str = ", ".join(campos_nombres)
+
+            query = f"INSERT INTO Empleados ({campos_str}) VALUES ({placeholders})"
+            cursor.execute(query, [campos[nombre] for nombre in campos_nombres])
+            conn.commit()
+
+            # Obtener el ID del empleado recién insertado
+            new_id = cursor.lastrowid
+
+            # Recuperar el empleado completo
+            cursor.execute("SELECT * FROM Empleados WHERE id_empleado = %s", (new_id,))
+            new_empleado = cursor.fetchone()
+
+            return new_empleado
+        except mysql.connector.Error as e:
+            conn.rollback()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Ya existe un empleado con CURP, correo, RFC o NSS proporcionado"
+                detail=f"Error al crear empleado: {str(e)}"
             )
-
-        # Preparar los campos para la inserción
-        campos = empleado.model_dump(exclude_unset=True)  # Cambiado dict() por model_dump()
-        campos_nombres = list(campos.keys())
-        placeholders = ", ".join(["%s"] * len(campos_nombres))
-        campos_str = ", ".join(campos_nombres)
-
-        query = f"INSERT INTO Empleados ({campos_str}) VALUES ({placeholders})"
-        cursor.execute(query, [campos[nombre] for nombre in campos_nombres])
-        conn.commit()
-
-        # Obtener el ID del empleado recién insertado
-        new_id = cursor.lastrowid
-
-        # Recuperar el empleado completo
-        cursor.execute("SELECT * FROM Empleados WHERE id_empleado = %s", (new_id,))
-        new_empleado = cursor.fetchone()
-
-        return new_empleado
-    except mysql.connector.Error as e:
-        conn.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Error al crear empleado: {str(e)}"
-        )
-    finally:
-        cursor.close()
-        conn.close()
+        finally:
+            cursor.close()
 
 
 @app.put("/empleados/{empleado_id}", response_model=EmpleadoResponse)
@@ -357,52 +366,50 @@ async def update_empleado(empleado_id: int, empleado_update: EmpleadoCreate,
             detail="ID de empleado inválido"
         )
 
-    conn = get_db_connection()
-    try:
+    # Usando context manager para manejar la conexión automáticamente
+    with get_db_connection() as conn:
         cursor = conn.cursor(dictionary=True, prepared=True)
+        try:
+            # Verificar si el empleado existe
+            cursor.execute("SELECT id_empleado FROM Empleados WHERE id_empleado = %s", (empleado_id,))
+            if not cursor.fetchone():
+                raise HTTPException(status_code=404, detail="Empleado no encontrado")
 
-        # Verificar si el empleado existe
-        cursor.execute("SELECT id_empleado FROM Empleados WHERE id_empleado = %s", (empleado_id,))
-        if not cursor.fetchone():
-            raise HTTPException(status_code=404, detail="Empleado no encontrado")
+            # Verificar que no haya conflictos con otros empleados
+            query = """
+                SELECT id_empleado FROM Empleados 
+                WHERE (curp = %s OR correo = %s OR rfc = %s OR nss = %s) AND id_empleado != %s
+                """
+            cursor.execute(query, (empleado_update.curp, empleado_update.correo, empleado_update.rfc, empleado_update.nss, empleado_id))
+            if cursor.fetchone():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Ya existe otro empleado con CURP, correo, RFC o NSS proporcionado"
+                )
 
-        # Verificar que no haya conflictos con otros empleados
-        query = """
-            SELECT id_empleado FROM Empleados 
-            WHERE (curp = %s OR correo = %s OR rfc = %s OR nss = %s) AND id_empleado != %s
-            """
-        cursor.execute(query, (
-        empleado_update.curp, empleado_update.correo, empleado_update.rfc, empleado_update.nss, empleado_id))
-        if cursor.fetchone():
+            # Preparar los campos para la actualización
+            campos = empleado_update.model_dump(exclude_unset=True)  # Cambiado dict() por model_dump()
+            set_clause = ", ".join([f"{k} = %s" for k in campos.keys()])
+            values = list(campos.values())
+            values.append(empleado_id)  # Para la condición WHERE
+
+            query = f"UPDATE Empleados SET {set_clause} WHERE id_empleado = %s"
+            cursor.execute(query, values)
+            conn.commit()
+
+            # Recuperar el empleado actualizado
+            cursor.execute("SELECT * FROM Empleados WHERE id_empleado = %s", (empleado_id,))
+            updated_empleado = cursor.fetchone()
+
+            return updated_empleado
+        except mysql.connector.Error as e:
+            conn.rollback()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Ya existe otro empleado con CURP, correo, RFC o NSS proporcionado"
+                detail=f"Error al actualizar empleado: {str(e)}"
             )
-
-        # Preparar los campos para la actualización
-        campos = empleado_update.model_dump(exclude_unset=True)  # Cambiado dict() por model_dump()
-        set_clause = ", ".join([f"{k} = %s" for k in campos.keys()])
-        values = list(campos.values())
-        values.append(empleado_id)  # Para la condición WHERE
-
-        query = f"UPDATE Empleados SET {set_clause} WHERE id_empleado = %s"
-        cursor.execute(query, values)
-        conn.commit()
-
-        # Recuperar el empleado actualizado
-        cursor.execute("SELECT * FROM Empleados WHERE id_empleado = %s", (empleado_id,))
-        updated_empleado = cursor.fetchone()
-
-        return updated_empleado
-    except mysql.connector.Error as e:
-        conn.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Error al actualizar empleado: {str(e)}"
-        )
-    finally:
-        cursor.close()
-        conn.close()
+        finally:
+            cursor.close()
 
 
 @app.delete("/empleados/{empleado_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -413,75 +420,73 @@ async def delete_empleado(empleado_id: int, current_user: dict = Depends(get_cur
             detail="ID de empleado inválido"
         )
 
-    conn = get_db_connection()
-    try:
+    # Usando context manager para manejar la conexión automáticamente
+    with get_db_connection() as conn:
         cursor = conn.cursor(prepared=True)
+        try:
+            # Verificar si el empleado existe
+            cursor.execute("SELECT id_empleado FROM Empleados WHERE id_empleado = %s", (empleado_id,))
+            if not cursor.fetchone():
+                raise HTTPException(status_code=404, detail="Empleado no encontrado")
 
-        # Verificar si el empleado existe
-        cursor.execute("SELECT id_empleado FROM Empleados WHERE id_empleado = %s", (empleado_id,))
-        if not cursor.fetchone():
-            raise HTTPException(status_code=404, detail="Empleado no encontrado")
+            # Eliminar el empleado
+            cursor.execute("DELETE FROM Empleados WHERE id_empleado = %s", (empleado_id,))
+            conn.commit()
 
-        # Eliminar el empleado
-        cursor.execute("DELETE FROM Empleados WHERE id_empleado = %s", (empleado_id,))
-        conn.commit()
-
-        return None
-    except mysql.connector.Error as e:
-        conn.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Error al eliminar empleado: {str(e)}"
-        )
-    finally:
-        cursor.close()
-        conn.close()
+            return None
+        except mysql.connector.Error as e:
+            conn.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Error al eliminar empleado: {str(e)}"
+            )
+        finally:
+            cursor.close()
 
 
 @app.post("/empleados/buscar/", response_model=List[EmpleadoResponse])
 async def buscar_empleados(busqueda: BusquedaEmpleado, current_user: dict = Depends(get_current_user)):
-    conn = get_db_connection()
-    try:
+    # Usando context manager para manejar la conexión automáticamente
+    with get_db_connection() as conn:
         cursor = conn.cursor(dictionary=True, prepared=True)
+        try:
+            # Lista de campos permitidos para la búsqueda
+            campos_permitidos = [
+                "nombre", "apellido_paterno", "apellido_materno",
+                "curp", "correo", "rfc", "nss", "telefono"
+            ]
 
-        # Lista de campos permitidos para la búsqueda
-        campos_permitidos = [
-            "nombre", "apellido_paterno", "apellido_materno",
-            "curp", "correo", "rfc", "nss", "telefono"
-        ]
+            # Construir la consulta según el campo especificado
+            if busqueda.campo:
+                # Validar que el campo especificado esté permitido
+                if busqueda.campo not in campos_permitidos:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Campo de búsqueda no permitido. Opciones válidas: {', '.join(campos_permitidos)}"
+                    )
 
-        # Construir la consulta según el campo especificado
-        if busqueda.campo:
-            # Validar que el campo especificado esté permitido
-            if busqueda.campo not in campos_permitidos:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Campo de búsqueda no permitido. Opciones válidas: {', '.join(campos_permitidos)}"
-                )
+                # Buscar en un campo específico
+                query = f"SELECT * FROM Empleados WHERE {busqueda.campo} LIKE %s"
+                cursor.execute(query, (f"%{busqueda.termino}%",))
+            else:
+                # Buscar en varios campos comunes
+                query = """
+                SELECT * FROM Empleados 
+                WHERE nombre LIKE %s 
+                   OR apellido_paterno LIKE %s 
+                   OR apellido_materno LIKE %s 
+                   OR curp LIKE %s 
+                   OR rfc LIKE %s 
+                   OR correo LIKE %s 
+                   OR nss LIKE %s
+                """
+                param = f"%{busqueda.termino}%"
+                cursor.execute(query, (param, param, param, param, param, param, param))
 
-            # Buscar en un campo específico
-            query = f"SELECT * FROM Empleados WHERE {busqueda.campo} LIKE %s"
-            cursor.execute(query, (f"%{busqueda.termino}%",))
-        else:
-            # Buscar en varios campos comunes
-            query = """
-            SELECT * FROM Empleados 
-            WHERE nombre LIKE %s 
-               OR apellido_paterno LIKE %s 
-               OR apellido_materno LIKE %s 
-               OR curp LIKE %s 
-               OR rfc LIKE %s 
-               OR correo LIKE %s 
-               OR nss LIKE %s
-            """
-            param = f"%{busqueda.termino}%"
-            cursor.execute(query, (param, param, param, param, param, param, param))
-
-        empleados = cursor.fetchall()
-        return empleados
-    finally:
-        cursor.close()
-        conn.close()
+            empleados = cursor.fetchall()
+            return empleados
+        finally:
+            cursor.close()
 
 
 # Endpoint para información de catálogos
@@ -505,15 +510,15 @@ async def get_catalogo(catalogo: str, current_user: dict = Depends(get_current_u
             detail=f"Catálogo no válido. Opciones: {', '.join(catalogos_permitidos.keys())}"
         )
 
-    conn = get_db_connection()
-    try:
+    # Usando context manager para manejar la conexión automáticamente
+    with get_db_connection() as conn:
         cursor = conn.cursor(dictionary=True, prepared=True)
-        cursor.execute(f"SELECT * FROM {catalogos_permitidos[catalogo]}")
-        items = cursor.fetchall()
-        return items
-    finally:
-        cursor.close()
-        conn.close()
+        try:
+            cursor.execute(f"SELECT * FROM {catalogos_permitidos[catalogo]}")
+            items = cursor.fetchall()
+            return items
+        finally:
+            cursor.close()
 
 
 def print_endpoints(host_ip):
