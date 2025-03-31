@@ -521,7 +521,7 @@ async def get_catalogo(catalogo: str, current_user: dict = Depends(get_current_u
             cursor.close()
 
 
-def print_endpoints(host_ip):
+def print_endpoints(host_ip="54.145.241.91"):
     """Imprime todos los endpoints disponibles en la API con sus descripciones."""
     print("\n" + "=" * 80)
     print(f"API de Empleados - Endpoints disponibles en http://{host_ip}:8000")
@@ -579,15 +579,8 @@ def print_endpoints(host_ip):
 
 # Modificar la sección de punto de entrada para incluir la impresión de endpoints
 if __name__ == "__main__":
-    # Obtener la IP pública (esto es solo un ejemplo, deberías obtenerla de forma dinámica)
-    import requests
-
-    try:
-        # Intentar obtener la IP pública
-        ip_publica = requests.get('https://api.ipify.org').text
-    except:
-        # Si falla, usar un placeholder
-        ip_publica = "tu-ip-publica-ec2"
+    # Usar la dirección IP fija de tu instancia EC2
+    ip_publica = "54.145.241.91"
 
     # Imprimir los endpoints
     print_endpoints(ip_publica)
