@@ -240,13 +240,13 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         try:
             # Consulta actualizada para coincidir con la estructura de la tabla
             query = """
-                SELECT id_usuario, nombre, correo, contraseña, rol, fecha_registro 
+                SELECT id_usuario, nombre, correo, password, rol, fecha_registro 
                 FROM Usuarios WHERE correo = %s
             """
             cursor.execute(query, (form_data.username,))  # form_data.username corresponde a correo
             user = cursor.fetchone()
 
-            if not user or user["contraseña"] != form_data.password:
+            if not user or user["password"] != form_data.password:
                 # Retardo adicional para prevenir ataques de timing
                 import time
                 time.sleep(0.5)
