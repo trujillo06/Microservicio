@@ -86,9 +86,10 @@ class TokenData(BaseModel):
     username: Optional[str] = None
 
 
+# Modelo de usuario actualizado para coincidir con la estructura de la tabla
 class UserLogin(BaseModel):
-    username: EmailStr
-    password: str
+    correo: EmailStr  # Cambiado de username a correo
+    password: str  # Esto coincide con el campo contraseña
 
 
 class EmpleadoBase(BaseModel):
@@ -216,11 +217,11 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         raise credentials_exception
 
     # Verificar en la base de datos si el usuario existe
-    # Usando context manager para manejar la conexión automáticamente
+    # Actualizado para coincidir con la estructura de la tabla de usuarios
     with get_db_connection() as conn:
-        cursor = conn.cursor(dictionary=True, prepared=True)  # Usar prepared statements
+        cursor = conn.cursor(dictionary=True, prepared=True)
         try:
-            query = "SELECT id_usuario, correo, rol FROM Usuarios WHERE correo = %s"
+            query = "SELECT id_usuario, nombre, correo, rol FROM Usuarios WHERE correo = %s"
             cursor.execute(query, (token_data.username,))
             user = cursor.fetchone()
             if user is None:
@@ -230,16 +231,19 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
             cursor.close()
 
 
-# Endpoints de autenticación
+# Endpoints de autenticación - Actualizado para usar los nombres de campo correctos
 @app.post("/token", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
     # Usando context manager para manejar la conexión automáticamente
     with get_db_connection() as conn:
         cursor = conn.cursor(dictionary=True, prepared=True)
         try:
-            # En un entorno real, la contraseña debería estar hasheada
-            query = "SELECT id_usuario, correo, contraseña, rol FROM Usuarios WHERE correo = %s"
-            cursor.execute(query, (form_data.username,))
+            # Consulta actualizada para coincidir con la estructura de la tabla
+            query = """
+                SELECT id_usuario, nombre, correo, contraseña, rol, fecha_registro 
+                FROM Usuarios WHERE correo = %s
+            """
+            cursor.execute(query, (form_data.username,))  # form_data.username corresponde a correo
             user = cursor.fetchone()
 
             if not user or user["contraseña"] != form_data.password:
@@ -254,7 +258,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
 
             access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
             access_token = create_access_token(
-                data={"sub": user["correo"], "role": user["rol"]},
+                data={"sub": user["correo"], "nombre": user["nombre"], "role": user["rol"]},
                 expires_delta=access_token_expires
             )
             return {"access_token": access_token, "token_type": "bearer"}
