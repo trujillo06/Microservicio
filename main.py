@@ -2,7 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from jose import JWTError, jwt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import List, Optional
 from pydantic import BaseModel, EmailStr, Field, field_validator
 import mysql.connector
@@ -47,7 +47,6 @@ db_config = {
 }
 
 # Crear un pool de conexiones para mejorar rendimiento y seguridad
-# Nota: El pool solo se inicializa, pero no se crean conexiones hasta que se soliciten
 connection_pool = pooling.MySQLConnectionPool(
     pool_name="empleados_pool",
     pool_size=5,
@@ -76,6 +75,24 @@ def get_db_connection():
             conn.close()
 
 
+# Funciones auxiliares para convertir entre datetime y string
+def parse_date(date_str):
+    """Convierte una cadena de fecha en objeto date"""
+    if not date_str:
+        return None
+    try:
+        return datetime.strptime(date_str, '%Y-%m-%d').date()
+    except ValueError:
+        raise ValueError('Formato de fecha inválido. Use YYYY-MM-DD')
+
+
+def format_date(date_obj):
+    """Convierte un objeto date en cadena con formato ISO"""
+    if not date_obj:
+        return None
+    return date_obj.isoformat()
+
+
 # Modelos de datos mejorados con validaciones
 class Token(BaseModel):
     access_token: str
@@ -96,7 +113,7 @@ class EmpleadoBase(BaseModel):
     nombre: str = Field(..., min_length=2, max_length=100)
     apellido_paterno: str = Field(..., min_length=2, max_length=100)
     apellido_materno: Optional[str] = Field(None, min_length=2, max_length=100)
-    fecha_nacimiento: str
+    fecha_nacimiento: date  # Cambiado de str a date
     sexo: int = Field(..., ge=1)
     estado_civil: int = Field(..., ge=1)
     direccion: Optional[str] = Field(None, max_length=255)
@@ -106,7 +123,7 @@ class EmpleadoBase(BaseModel):
     rfc: str = Field(..., min_length=12, max_length=13)
     nss: str = Field(..., min_length=11, max_length=11)
     foto: Optional[str] = None
-    fecha_ingreso: str
+    fecha_ingreso: date  # Cambiado de str a date
     tipo_contrato: int = Field(..., ge=1)
     puesto: int = Field(..., ge=1)
     departamento: int = Field(..., ge=1)
@@ -139,21 +156,18 @@ class EmpleadoBase(BaseModel):
             raise ValueError('NSS debe contener 11 dígitos numéricos')
         return v
 
-    @field_validator('fecha_nacimiento', 'fecha_ingreso')
-    @classmethod
-    def validate_fecha(cls, v):
-        try:
-            datetime.strptime(v, '%Y-%m-%d')
-        except ValueError:
-            raise ValueError('Formato de fecha inválido. Use YYYY-MM-DD')
-        return v
-
     @field_validator('telefono')
     @classmethod
     def validate_telefono(cls, v):
         if v and not re.match(r'^\+?[0-9]{10,15}$', v):
             raise ValueError('Formato de teléfono inválido')
         return v
+
+    # Configuración del modelo
+    class Config:
+        json_encoders = {
+            date: lambda dt: dt.isoformat() if dt else None
+        }
 
 
 class EmpleadoCreate(EmpleadoBase):
@@ -172,6 +186,9 @@ class EmpleadoResponse(EmpleadoBase):
 
     class Config:
         from_attributes = True  # Reemplaza orm_mode=True
+        json_encoders = {
+            date: lambda dt: dt.isoformat() if dt else None
+        }
 
 
 class BusquedaEmpleado(BaseModel):
@@ -190,6 +207,39 @@ def sanitize_sql_input(value):
         sanitized = re.sub(r'[;\'"\\]', '', value)
         return sanitized
     return value
+
+
+# Funciones para procesar datos antes de enviarlos a la base de datos y después de recibirlos
+def process_employee_for_db(empleado_data):
+    """Procesa los datos del empleado para la base de datos, convirtiendo objetos date a strings"""
+    processed_data = empleado_data.copy()
+
+    # Convertir objetos date a strings en formato MySQL
+    if isinstance(processed_data.get('fecha_nacimiento'), date):
+        processed_data['fecha_nacimiento'] = processed_data['fecha_nacimiento'].isoformat()
+
+    if isinstance(processed_data.get('fecha_ingreso'), date):
+        processed_data['fecha_ingreso'] = processed_data['fecha_ingreso'].isoformat()
+
+    return processed_data
+
+
+def process_db_employee(db_empleado):
+    """Procesa los datos del empleado desde la base de datos, convirtiendo strings a objetos date"""
+    if not db_empleado:
+        return None
+
+    processed_empleado = dict(db_empleado)
+
+    # Convertir strings de fecha a objetos date
+    for date_field in ['fecha_nacimiento', 'fecha_ingreso']:
+        if date_field in processed_empleado and processed_empleado[date_field]:
+            if isinstance(processed_empleado[date_field], str):
+                processed_empleado[date_field] = parse_date(processed_empleado[date_field])
+            elif isinstance(processed_empleado[date_field], datetime):
+                processed_empleado[date_field] = processed_empleado[date_field].date()
+
+    return processed_empleado
 
 
 # Funciones de seguridad mejoradas
@@ -217,7 +267,6 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         raise credentials_exception
 
     # Verificar en la base de datos si el usuario existe
-    # Actualizado para coincidir con la estructura de la tabla de usuarios
     with get_db_connection() as conn:
         cursor = conn.cursor(dictionary=True, prepared=True)
         try:
@@ -231,19 +280,17 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
             cursor.close()
 
 
-# Endpoints de autenticación - Actualizado para usar los nombres de campo correctos
+# Endpoints de autenticación
 @app.post("/token", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
-    # Usando context manager para manejar la conexión automáticamente
     with get_db_connection() as conn:
         cursor = conn.cursor(dictionary=True, prepared=True)
         try:
-            # Consulta actualizada para coincidir con la estructura de la tabla
             query = """
                 SELECT id_usuario, nombre, correo, password, rol, fecha_registro 
                 FROM Usuarios WHERE correo = %s
             """
-            cursor.execute(query, (form_data.username,))  # form_data.username corresponde a correo
+            cursor.execute(query, (form_data.username,))
             user = cursor.fetchone()
 
             if not user or user["password"] != form_data.password:
@@ -276,7 +323,6 @@ async def get_empleados(current_user: dict = Depends(get_current_user), skip: in
             detail="Parámetros de paginación inválidos"
         )
 
-    # Usando context manager para manejar la conexión automáticamente
     with get_db_connection() as conn:
         cursor = conn.cursor(dictionary=True, prepared=True)
         try:
@@ -286,7 +332,10 @@ async def get_empleados(current_user: dict = Depends(get_current_user), skip: in
                 LIMIT %s OFFSET %s
                 """
             cursor.execute(query, (limit, skip))
-            empleados = cursor.fetchall()
+            empleados_raw = cursor.fetchall()
+
+            # Procesar las fechas para cada empleado
+            empleados = [process_db_employee(emp) for emp in empleados_raw]
             return empleados
         finally:
             cursor.close()
@@ -300,15 +349,17 @@ async def get_empleado(empleado_id: int, current_user: dict = Depends(get_curren
             detail="ID de empleado inválido"
         )
 
-    # Usando context manager para manejar la conexión automáticamente
     with get_db_connection() as conn:
         cursor = conn.cursor(dictionary=True, prepared=True)
         try:
             query = "SELECT * FROM Empleados WHERE id_empleado = %s"
             cursor.execute(query, (empleado_id,))
-            empleado = cursor.fetchone()
-            if empleado is None:
+            empleado_raw = cursor.fetchone()
+            if empleado_raw is None:
                 raise HTTPException(status_code=404, detail="Empleado no encontrado")
+
+            # Procesar las fechas
+            empleado = process_db_employee(empleado_raw)
             return empleado
         finally:
             cursor.close()
@@ -316,7 +367,6 @@ async def get_empleado(empleado_id: int, current_user: dict = Depends(get_curren
 
 @app.post("/empleados/", response_model=EmpleadoResponse, status_code=status.HTTP_201_CREATED)
 async def create_empleado(empleado: EmpleadoCreate, current_user: dict = Depends(get_current_user)):
-    # Usando context manager para manejar la conexión automáticamente
     with get_db_connection() as conn:
         cursor = conn.cursor(dictionary=True, prepared=True)
         try:
@@ -333,8 +383,10 @@ async def create_empleado(empleado: EmpleadoCreate, current_user: dict = Depends
                     detail="Ya existe un empleado con CURP, correo, RFC o NSS proporcionado"
                 )
 
-            # Preparar los campos para la inserción
-            campos = empleado.model_dump(exclude_unset=True)  # Cambiado dict() por model_dump()
+            # Preparar los campos para la inserción - procesando las fechas
+            campos = empleado.model_dump(exclude_unset=True)
+            campos = process_employee_for_db(campos)
+
             campos_nombres = list(campos.keys())
             placeholders = ", ".join(["%s"] * len(campos_nombres))
             campos_str = ", ".join(campos_nombres)
@@ -348,7 +400,10 @@ async def create_empleado(empleado: EmpleadoCreate, current_user: dict = Depends
 
             # Recuperar el empleado completo
             cursor.execute("SELECT * FROM Empleados WHERE id_empleado = %s", (new_id,))
-            new_empleado = cursor.fetchone()
+            new_empleado_raw = cursor.fetchone()
+
+            # Procesar las fechas
+            new_empleado = process_db_employee(new_empleado_raw)
 
             return new_empleado
         except mysql.connector.Error as e:
@@ -370,7 +425,6 @@ async def update_empleado(empleado_id: int, empleado_update: EmpleadoCreate,
             detail="ID de empleado inválido"
         )
 
-    # Usando context manager para manejar la conexión automáticamente
     with get_db_connection() as conn:
         cursor = conn.cursor(dictionary=True, prepared=True)
         try:
@@ -384,15 +438,18 @@ async def update_empleado(empleado_id: int, empleado_update: EmpleadoCreate,
                 SELECT id_empleado FROM Empleados 
                 WHERE (curp = %s OR correo = %s OR rfc = %s OR nss = %s) AND id_empleado != %s
                 """
-            cursor.execute(query, (empleado_update.curp, empleado_update.correo, empleado_update.rfc, empleado_update.nss, empleado_id))
+            cursor.execute(query, (
+            empleado_update.curp, empleado_update.correo, empleado_update.rfc, empleado_update.nss, empleado_id))
             if cursor.fetchone():
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Ya existe otro empleado con CURP, correo, RFC o NSS proporcionado"
                 )
 
-            # Preparar los campos para la actualización
-            campos = empleado_update.model_dump(exclude_unset=True)  # Cambiado dict() por model_dump()
+            # Preparar los campos para la actualización - procesando las fechas
+            campos = empleado_update.model_dump(exclude_unset=True)
+            campos = process_employee_for_db(campos)
+
             set_clause = ", ".join([f"{k} = %s" for k in campos.keys()])
             values = list(campos.values())
             values.append(empleado_id)  # Para la condición WHERE
@@ -403,7 +460,10 @@ async def update_empleado(empleado_id: int, empleado_update: EmpleadoCreate,
 
             # Recuperar el empleado actualizado
             cursor.execute("SELECT * FROM Empleados WHERE id_empleado = %s", (empleado_id,))
-            updated_empleado = cursor.fetchone()
+            updated_empleado_raw = cursor.fetchone()
+
+            # Procesar las fechas
+            updated_empleado = process_db_employee(updated_empleado_raw)
 
             return updated_empleado
         except mysql.connector.Error as e:
@@ -424,7 +484,6 @@ async def delete_empleado(empleado_id: int, current_user: dict = Depends(get_cur
             detail="ID de empleado inválido"
         )
 
-    # Usando context manager para manejar la conexión automáticamente
     with get_db_connection() as conn:
         cursor = conn.cursor(prepared=True)
         try:
@@ -450,7 +509,6 @@ async def delete_empleado(empleado_id: int, current_user: dict = Depends(get_cur
 
 @app.post("/empleados/buscar/", response_model=List[EmpleadoResponse])
 async def buscar_empleados(busqueda: BusquedaEmpleado, current_user: dict = Depends(get_current_user)):
-    # Usando context manager para manejar la conexión automáticamente
     with get_db_connection() as conn:
         cursor = conn.cursor(dictionary=True, prepared=True)
         try:
@@ -487,7 +545,10 @@ async def buscar_empleados(busqueda: BusquedaEmpleado, current_user: dict = Depe
                 param = f"%{busqueda.termino}%"
                 cursor.execute(query, (param, param, param, param, param, param, param))
 
-            empleados = cursor.fetchall()
+            empleados_raw = cursor.fetchall()
+
+            # Procesar las fechas para cada empleado
+            empleados = [process_db_employee(emp) for emp in empleados_raw]
             return empleados
         finally:
             cursor.close()
@@ -514,7 +575,6 @@ async def get_catalogo(catalogo: str, current_user: dict = Depends(get_current_u
             detail=f"Catálogo no válido. Opciones: {', '.join(catalogos_permitidos.keys())}"
         )
 
-    # Usando context manager para manejar la conexión automáticamente
     with get_db_connection() as conn:
         cursor = conn.cursor(dictionary=True, prepared=True)
         try:
