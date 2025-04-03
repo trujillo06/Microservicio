@@ -24,9 +24,21 @@ app = FastAPI(
 )
 
 # Configuración de CORS
+# Lista de orígenes permitidos que siempre deberían funcionar
+allowed_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173"
+]
+
+# Obtener orígenes adicionales del archivo .env
+extra_origins = os.getenv("ALLOWED_ORIGINS", "")
+if extra_origins and extra_origins != "*":
+    # Añadir orígenes adicionales específicos
+    allowed_origins.extend(extra_origins.split(","))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[os.getenv("ALLOWED_ORIGINS", "*").split(",")],  # En producción, especificar dominios concretos
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
