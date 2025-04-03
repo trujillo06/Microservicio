@@ -1,7 +1,5 @@
-from fastapi import FastAPI, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from jose import JWTError, jwt
 from datetime import datetime, timedelta, date
 from typing import List, Optional
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -43,11 +41,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Configuración de seguridad
-SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 
 # Configuración de conexión a base de datos utilizando pool de conexiones
 db_config = {
@@ -106,21 +99,6 @@ def format_date(date_obj):
 
 
 # Modelos de datos mejorados con validaciones
-class Token(BaseModel):
-    access_token: str
-    token_type: str
-
-
-class TokenData(BaseModel):
-    username: Optional[str] = None
-
-
-# Modelo de usuario actualizado para coincidir con la estructura de la tabla
-class UserLogin(BaseModel):
-    correo: EmailStr  # Cambiado de username a correo
-    password: str  # Esto coincide con el campo contraseña
-
-
 class EmpleadoBase(BaseModel):
     nombre: str = Field(..., min_length=2, max_length=100)
     apellido_paterno: str = Field(..., min_length=2, max_length=100)
@@ -208,10 +186,6 @@ class BusquedaEmpleado(BaseModel):
     campo: Optional[str] = Field(None, pattern=r'^[a-zA-Z_]+$')  # Cambiado regex por pattern
 
 
-# Configuración de autenticación
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-
-
 # Middleware para sanitizar consultas SQL
 def sanitize_sql_input(value):
     if isinstance(value, str):
@@ -254,80 +228,9 @@ def process_db_employee(db_empleado):
     return processed_empleado
 
 
-# Funciones de seguridad mejoradas
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta if expires_delta else timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-
-
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Credenciales no válidas",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-        token_data = TokenData(username=username)
-    except JWTError:
-        raise credentials_exception
-
-    # Verificar en la base de datos si el usuario existe
-    with get_db_connection() as conn:
-        cursor = conn.cursor(dictionary=True, prepared=True)
-        try:
-            query = "SELECT id_usuario, nombre, correo, rol FROM Usuarios WHERE correo = %s"
-            cursor.execute(query, (token_data.username,))
-            user = cursor.fetchone()
-            if user is None:
-                raise credentials_exception
-            return user
-        finally:
-            cursor.close()
-
-
-# Endpoints de autenticación
-@app.post("/token", response_model=Token)
-async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
-    with get_db_connection() as conn:
-        cursor = conn.cursor(dictionary=True, prepared=True)
-        try:
-            query = """
-                SELECT id_usuario, nombre, correo, password, rol, fecha_registro 
-                FROM Usuarios WHERE correo = %s
-            """
-            cursor.execute(query, (form_data.username,))
-            user = cursor.fetchone()
-
-            if not user or user["password"] != form_data.password:
-                # Retardo adicional para prevenir ataques de timing
-                import time
-                time.sleep(0.5)
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Usuario o contraseña incorrectos",
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
-
-            access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-            access_token = create_access_token(
-                data={"sub": user["correo"], "nombre": user["nombre"], "role": user["rol"]},
-                expires_delta=access_token_expires
-            )
-            return {"access_token": access_token, "token_type": "bearer"}
-        finally:
-            cursor.close()
-
-
 # Endpoints de empleados
 @app.get("/empleados/", response_model=List[EmpleadoResponse])
-async def get_empleados(current_user: dict = Depends(get_current_user), skip: int = 0, limit: int = 100):
+async def get_empleados(skip: int = 0, limit: int = 100):
     # Validación adicional de parámetros
     if skip < 0 or limit < 1 or limit > 1000:
         raise HTTPException(
@@ -354,7 +257,7 @@ async def get_empleados(current_user: dict = Depends(get_current_user), skip: in
 
 
 @app.get("/empleados/{empleado_id}", response_model=EmpleadoResponse)
-async def get_empleado(empleado_id: int, current_user: dict = Depends(get_current_user)):
+async def get_empleado(empleado_id: int):
     if empleado_id <= 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -378,7 +281,7 @@ async def get_empleado(empleado_id: int, current_user: dict = Depends(get_curren
 
 
 @app.post("/empleados/", response_model=EmpleadoResponse, status_code=status.HTTP_201_CREATED)
-async def create_empleado(empleado: EmpleadoCreate, current_user: dict = Depends(get_current_user)):
+async def create_empleado(empleado: EmpleadoCreate):
     with get_db_connection() as conn:
         cursor = conn.cursor(dictionary=True, prepared=True)
         try:
@@ -429,8 +332,7 @@ async def create_empleado(empleado: EmpleadoCreate, current_user: dict = Depends
 
 
 @app.put("/empleados/{empleado_id}", response_model=EmpleadoResponse)
-async def update_empleado(empleado_id: int, empleado_update: EmpleadoCreate,
-                          current_user: dict = Depends(get_current_user)):
+async def update_empleado(empleado_id: int, empleado_update: EmpleadoCreate):
     if empleado_id <= 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -451,7 +353,7 @@ async def update_empleado(empleado_id: int, empleado_update: EmpleadoCreate,
                 WHERE (curp = %s OR correo = %s OR rfc = %s OR nss = %s) AND id_empleado != %s
                 """
             cursor.execute(query, (
-            empleado_update.curp, empleado_update.correo, empleado_update.rfc, empleado_update.nss, empleado_id))
+                empleado_update.curp, empleado_update.correo, empleado_update.rfc, empleado_update.nss, empleado_id))
             if cursor.fetchone():
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -489,7 +391,7 @@ async def update_empleado(empleado_id: int, empleado_update: EmpleadoCreate,
 
 
 @app.delete("/empleados/{empleado_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_empleado(empleado_id: int, current_user: dict = Depends(get_current_user)):
+async def delete_empleado(empleado_id: int):
     if empleado_id <= 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -520,7 +422,7 @@ async def delete_empleado(empleado_id: int, current_user: dict = Depends(get_cur
 
 
 @app.post("/empleados/buscar/", response_model=List[EmpleadoResponse])
-async def buscar_empleados(busqueda: BusquedaEmpleado, current_user: dict = Depends(get_current_user)):
+async def buscar_empleados(busqueda: BusquedaEmpleado):
     with get_db_connection() as conn:
         cursor = conn.cursor(dictionary=True, prepared=True)
         try:
@@ -568,7 +470,7 @@ async def buscar_empleados(busqueda: BusquedaEmpleado, current_user: dict = Depe
 
 # Endpoint para información de catálogos
 @app.get("/catalogos/{catalogo}")
-async def get_catalogo(catalogo: str, current_user: dict = Depends(get_current_user)):
+async def get_catalogo(catalogo: str):
     # Mapeo de nombres de catálogos a tablas
     catalogos_permitidos = {
         "sexo": "Sexo",
@@ -602,12 +504,6 @@ def print_endpoints(host_ip="54.145.241.91"):
     print("\n" + "=" * 80)
     print(f"API de Empleados - Endpoints disponibles en http://{host_ip}:8000")
     print("=" * 80)
-
-    # Autenticación
-    print("\n-- AUTENTICACIÓN --")
-    print(f"POST http://{host_ip}:8000/token")
-    print("  Descripción: Obtener token de autenticación")
-    print("  Cuerpo: {'username': 'correo@ejemplo.com', 'password': 'contraseña'}")
 
     # Empleados
     print("\n-- GESTIÓN DE EMPLEADOS --")
@@ -646,10 +542,6 @@ def print_endpoints(host_ip="54.145.241.91"):
 
     print(f"GET http://{host_ip}:8000/redoc")
     print("  Descripción: Documentación alternativa de la API en formato ReDoc")
-
-    print("\n-- NOTA --")
-    print("  Todos los endpoints (excepto documentación) requieren autenticación con token Bearer:")
-    print("  Header: Authorization: Bearer tu_token_aquí")
     print("=" * 80 + "\n")
 
 
